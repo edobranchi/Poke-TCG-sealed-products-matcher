@@ -4,6 +4,8 @@ Tracks prices of Pokemon TCG sealed products (booster boxes, ETBs, tins,
 blisters...) in both USD and EUR, and packages them into a small SQLite file
 that my collection app syncs daily.
 
+![catalog](screenshots/catalog.png)
+
 I built this because no free API covers sealed products in both currencies.
 What does exist:
 
@@ -48,6 +50,10 @@ a wrong one is worse.
 - **Decisions** - everything decided so far, with undo and a yaml export
 - **Rematch** - paste a Cardmarket id or URL onto any product when the
   matcher couldn't figure it out
+
+![divergence](screenshots/divergence.png)
+
+![status](screenshots/status.png)
 
 `validate_db.py` checks every build (referential integrity, price sanity,
 coverage floors on the products people actually look up) and blocks
