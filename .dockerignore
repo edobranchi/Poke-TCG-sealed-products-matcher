@@ -1,0 +1,14 @@
+.git
+.gitignore
+CLAUDE.md
+out/
+data/
+*.db
+*.db-wal
+*.db-shm
+screenshots/
+tests/
+__pycache__/
+.idea/
+*.log
+nohup.out

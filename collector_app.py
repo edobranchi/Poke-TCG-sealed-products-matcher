@@ -14,7 +14,7 @@ New products are NOT published until approved in triage. If you never open
 the console, already-approved products just keep updating.
 
 Env vars: PORT (8811), OUT_DIR (out), STATE_DB (collector_state.db),
-SCHEDULE (1), PUBLISH (0 - upload step, off until hosting is set up).
+SCHEDULE (1), PUBLISH (0), GH_TOKEN, DATA_REPO (owner/repo for release uploads).
 """
 
 import datetime as dt
@@ -33,6 +33,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 import build_sealed_db as pipeline
+import publish as publisher
 
 PORT = int(os.environ.get("PORT", "8811"))
 OUT_DIR = os.environ.get("OUT_DIR", "out")
@@ -121,7 +122,22 @@ def run_pipeline(reason):
                        (f"validate: {summary} (exit {check.returncode})",))
         db.close()
         if os.environ.get("PUBLISH", "0") == "1" and check.returncode == 0:
-            print("[console] upload step would go here - not set up yet")
+            try:
+                published = publisher.publish(OUT_DIR)
+                pub_note = "published ok" if published else "skipped (same version)"
+                db = open_state()
+                with db:
+                    db.execute("UPDATE runs SET message=? WHERE id=(SELECT MAX(id) FROM runs)",
+                               (f"validate: {summary} (exit {check.returncode}) | {pub_note}",))
+                db.close()
+                log.info("publish: %s", pub_note)
+            except Exception as pub_err:
+                log.warning("publish failed: %s", pub_err)
+                db = open_state()
+                with db:
+                    db.execute("UPDATE runs SET message=? WHERE id=(SELECT MAX(id) FROM runs)",
+                               (f"validate ok | publish FAILED: {pub_err}",))
+                db.close()
         return {"ok": True, "version": version, "validate_exit": check.returncode}
     except Exception as e:
         return {"ok": False, "error": str(e)}

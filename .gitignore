@@ -1,5 +1,6 @@
 # data artifacts - the collector's output and state stay local
 out/
+data/
 *.db
 *.db-wal
 *.db-shm

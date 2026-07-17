@@ -1,0 +1,22 @@
+services:
+  collector:
+    build: .
+    container_name: sealed-collector
+    restart: unless-stopped
+    ports:
+      - "8811:8811"
+    volumes:
+      # keep this directory on a real disk and back it up -
+      # collector_state.db in here holds the price history and every
+      # decision made in the console
+      - ./data:/data
+    environment:
+      - SCHEDULE=1
+      - PUBLISH=0
+    mem_limit: 1g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8811/status.json', timeout=5)\""]
+      interval: 5m
+      timeout: 10s
+      retries: 3

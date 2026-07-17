@@ -80,6 +80,19 @@ python3 collector_app.py
 python3 -m unittest discover -s tests
 ```
 
+Or with Docker, for running it permanently on a home server:
+
+```bash
+docker compose up -d --build
+# console at http://<host>:8811, runs daily at 03:00 UTC on its own
+```
+
+State and output land in `./data/` - keep that directory on a real disk and
+back it up, it holds the price history and every decision made in the console.
+If you already have a `collector_state.db` from running locally, drop it (and
+your `out/` directory) into `./data/` before the first start, otherwise the
+collector starts from scratch and your curation decisions don't come along.
+
 ## Files
 
 | file | what |
