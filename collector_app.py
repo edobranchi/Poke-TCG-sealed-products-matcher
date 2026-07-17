@@ -34,6 +34,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 import build_sealed_db as pipeline
 import publish as publisher
+import notify
 
 PORT = int(os.environ.get("PORT", "8811"))
 OUT_DIR = os.environ.get("OUT_DIR", "out")
@@ -106,6 +107,9 @@ def save_decision(state_db, product_id, decision, cm_id):
 
 # ------------------------------------------------------------ running
 
+CONSOLE_URL = os.environ.get("CONSOLE_URL", f"http://192.168.1.31:{PORT}")
+
+
 def run_pipeline(reason):
     if not run_lock.acquire(blocking=False):
         return {"ok": False, "error": "a run is already in progress"}
@@ -131,6 +135,9 @@ def run_pipeline(reason):
                                (f"validate: {summary} (exit {check.returncode}) | {pub_note}",))
                 db.close()
                 log.info("publish: %s", pub_note)
+                if published:
+                    notify.run_ok(version, report["products"], report["cm_matched"],
+                                  report["pending"], CONSOLE_URL)
             except Exception as pub_err:
                 log.warning("publish failed: %s", pub_err)
                 db = open_state()
@@ -138,8 +145,15 @@ def run_pipeline(reason):
                     db.execute("UPDATE runs SET message=? WHERE id=(SELECT MAX(id) FROM runs)",
                                (f"validate ok | publish FAILED: {pub_err}",))
                 db.close()
+                notify.publish_failed(str(pub_err))
+        elif check.returncode == 0:
+            # publish off but run succeeded - still notify if there's new triage items
+            if report["pending"]:
+                notify.run_ok(version, report["products"], report["cm_matched"],
+                              report["pending"], CONSOLE_URL)
         return {"ok": True, "version": version, "validate_exit": check.returncode}
     except Exception as e:
+        notify.run_failed("pipeline", str(e))
         return {"ok": False, "error": str(e)}
     finally:
         run_lock.release()
