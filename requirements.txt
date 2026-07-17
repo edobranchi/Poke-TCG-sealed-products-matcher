@@ -1,0 +1,6 @@
+requests>=2.31
+pyyaml>=6.0
+# collector_app.py (dashboard + scheduler)
+fastapi>=0.110
+uvicorn[standard]>=0.29
+apscheduler>=3.10

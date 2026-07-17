@@ -1,0 +1,18 @@
+# data artifacts - the collector's output and state stay local
+out/
+*.db
+*.db-wal
+*.db-shm
+meta.json
+*.log
+nohup.out
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE / OS
+.idea/
+.DS_Store
