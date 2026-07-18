@@ -500,7 +500,7 @@ def price_around(state_db, product_id, target_date, column):
 
 
 def build_output(state_db, out_dir, today, sets, products, tp_prices,
-                 matched, cm_prices, cm_date, cm_available):
+                 matched, cm_prices, cm_date, cm_available, virtual_sets=None):
     # today's snapshot goes into the private history first
     with state_db:
         for product in products:
@@ -542,7 +542,7 @@ def build_output(state_db, out_dir, today, sets, products, tp_prices,
     out.executemany(
         "INSERT INTO sealed_sets VALUES (:group_id,:name,:abbreviation,:published_on,:tcgdex_logo_url,:tcgdex_set_id)",
         sets)
-    for vs_id, vs in virtual_sets.items():
+    for vs_id, vs in (virtual_sets or {}).items():
         full_id = vs_id if vs_id.startswith("custom:") else f"custom:{vs_id}"
         out.execute("INSERT OR REPLACE INTO virtual_sets VALUES (?,?,?)",
                     (full_id, vs.get("display_name", vs_id), vs.get("logo_url")))
@@ -777,7 +777,7 @@ def run(out_dir="out", state_path="collector_state.db", limit_groups=None,
         stage = "build"
         version, priced_count = build_output(state_db, out_dir, today, sets, approved,
                                              tp_prices, matched, cm_prices, cm_date,
-                                             cm_available)
+                                             cm_available, virtual_sets=virtual_sets)
         save_pending(state_db, pending, group_names, pending_match_info)
 
         state_db.execute(
