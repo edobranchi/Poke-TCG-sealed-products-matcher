@@ -244,14 +244,14 @@ LOGO_DIALOG = """
  </div>
 </div>
 <script>
-let _lgName=null,_lgSets=null;
+let _lgName=null,_lgSets=null,_lgFiltered=[];
 function lgOpen(name,hasOverride){
   _lgName=name;
   document.getElementById('lgname').textContent=name;
   document.getElementById('lgq').value='';
   document.getElementById('lgdlg').style.display='flex';
   document.getElementById('lgclear').innerHTML=hasOverride
-    ?'<button class="ghost" onclick="lgSave(null)">✕ Clear override (revert to auto-match)</button>':'';
+    ?'<button class="ghost" onclick="lgSave(null)">Clear override (revert to auto-match)</button>':'';
   if(_lgSets){lgFilter();return}
   document.getElementById('lgsets').innerHTML='<span class="dim">Loading TCGDex sets…</span>';
   fetch('/api/tcgdex_sets').then(r=>r.json()).then(sets=>{
@@ -262,13 +262,14 @@ function lgClose(){document.getElementById('lgdlg').style.display='none'}
 function lgFilter(){
   if(!_lgSets)return;
   const q=document.getElementById('lgq').value.toLowerCase();
-  const list=q?_lgSets.filter(s=>s.name.toLowerCase().includes(q)||s.id.includes(q)):_lgSets;
-  document.getElementById('lgsets').innerHTML=list.map(s=>
-    '<div class="cand" onclick="lgSave(\''+s.logo+'\')" style="display:flex;align-items:center;gap:8px">'+
+  _lgFiltered=q?_lgSets.filter(s=>s.name.toLowerCase().includes(q)||s.id.includes(q)):_lgSets.slice();
+  document.getElementById('lgsets').innerHTML=_lgFiltered.map((s,i)=>
+    '<div class="cand" onclick="lgPickIdx('+i+')" style="display:flex;align-items:center;gap:8px">'+
     '<img src="'+s.logo+'.png" loading="lazy" style="width:52px;height:30px;object-fit:contain;background:#fff;border-radius:3px;flex-shrink:0">'+
     '<div><b>'+s.name+'</b><br><span class="dim">'+s.id+'</span></div></div>'
   ).join('')||'<span class="dim">nothing found</span>';
 }
+function lgPickIdx(i){lgSave(_lgFiltered[i].logo)}
 function lgSave(logoUrl){
   fetch('/api/logo_override',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({group_name:_lgName,logo_url:logoUrl})})
@@ -815,7 +816,7 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
             f'<td><b>{html.escape(name)}</b><br><span class="dim">{html.escape(abbr)} · {year}</span></td>'
             f'<td>{STATUS_BADGE[status]}</td>'
             f'<td><button class="ghost" style="font-size:11px;padding:3px 8px" '
-            f'onclick="lgOpen({json.dumps(name)},{json.dumps(has_override)})">'
+            f'onclick="lgOpen({html.escape(json.dumps(name))},{str(has_override).lower()})">'
             f'Assign…</button></td>'
             f'</tr>'
         )
