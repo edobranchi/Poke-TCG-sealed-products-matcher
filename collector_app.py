@@ -26,7 +26,11 @@ import subprocess
 import sys
 import threading
 
+import time
+
+import requests
 import uvicorn
+import yaml
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, Request
@@ -46,6 +50,50 @@ CM_URL = "https://www.cardmarket.com/en/Pokemon/Products?idProduct={}"
 
 app = FastAPI(title="sealed-collector")
 run_lock = threading.Lock()
+
+LOGO_OVERRIDES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo_overrides.yaml")
+_tcgdex_sets_cache: list | None = None
+_tcgdex_sets_at: float = 0.0
+
+
+def _load_logo_overrides() -> dict:
+    try:
+        if os.path.exists(LOGO_OVERRIDES_FILE):
+            with open(LOGO_OVERRIDES_FILE) as f:
+                return yaml.safe_load(f) or {}
+    except Exception as e:
+        print(f"[logo] load overrides failed: {e}")
+    return {}
+
+
+def _save_logo_overrides(overrides: dict) -> None:
+    try:
+        with open(LOGO_OVERRIDES_FILE, "w") as f:
+            yaml.dump(overrides, f, default_flow_style=False, allow_unicode=True)
+    except Exception as e:
+        print(f"[logo] save overrides failed: {e}")
+
+
+def _get_tcgdex_sets() -> list:
+    global _tcgdex_sets_cache, _tcgdex_sets_at
+    if _tcgdex_sets_cache is not None and (time.time() - _tcgdex_sets_at) < 3600:
+        return _tcgdex_sets_cache
+    try:
+        resp = requests.get(
+            "https://api.tcgdex.net/v2/en/sets",
+            headers={"User-Agent": pipeline.USER_AGENT},
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            _tcgdex_sets_cache = sorted(
+                [s for s in resp.json() if s.get("logo")],
+                key=lambda s: s.get("name", ""),
+            )
+            _tcgdex_sets_at = time.time()
+            print(f"[logo] tcgdex sets fetched: {len(_tcgdex_sets_cache)}")
+    except Exception as e:
+        print(f"[logo] tcgdex sets fetch failed: {e}")
+    return _tcgdex_sets_cache or []
 
 
 def open_state():
@@ -183,6 +231,54 @@ STYLE = """<style>
  .cand:hover{border-color:#6c63ff}
 </style>"""
 
+LOGO_DIALOG = """
+<div id="lgdlg" style="display:none;position:fixed;inset:0;background:#000a;z-index:9;align-items:flex-start;justify-content:center;padding-top:40px;overflow:auto">
+ <div style="background:#17172a;border-radius:12px;padding:18px;width:700px;max-width:96vw">
+  <p><b>Assign TCGDex logo to:</b><br>
+     <span id="lgname" style="color:#6c63ff;word-break:break-all"></span>
+     <button class="ghost" style="float:right" onclick="lgClose()">✕</button></p>
+  <p id="lgclear"></p>
+  <p><input id="lgq" placeholder="search by name or id…"
+       style="width:100%;box-sizing:border-box" oninput="lgFilter()"></p>
+  <div id="lgsets" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px;max-height:55vh;overflow:auto"></div>
+ </div>
+</div>
+<script>
+let _lgName=null,_lgSets=null;
+function lgOpen(name,hasOverride){
+  _lgName=name;
+  document.getElementById('lgname').textContent=name;
+  document.getElementById('lgq').value='';
+  document.getElementById('lgdlg').style.display='flex';
+  document.getElementById('lgclear').innerHTML=hasOverride
+    ?'<button class="ghost" onclick="lgSave(null)">✕ Clear override (revert to auto-match)</button>':'';
+  if(_lgSets){lgFilter();return}
+  document.getElementById('lgsets').innerHTML='<span class="dim">Loading TCGDex sets…</span>';
+  fetch('/api/tcgdex_sets').then(r=>r.json()).then(sets=>{
+    _lgSets=sets;lgFilter();
+  }).catch(e=>document.getElementById('lgsets').innerHTML='<span class="bad">'+e+'</span>');
+}
+function lgClose(){document.getElementById('lgdlg').style.display='none'}
+function lgFilter(){
+  if(!_lgSets)return;
+  const q=document.getElementById('lgq').value.toLowerCase();
+  const list=q?_lgSets.filter(s=>s.name.toLowerCase().includes(q)||s.id.includes(q)):_lgSets;
+  document.getElementById('lgsets').innerHTML=list.map(s=>
+    '<div class="cand" onclick="lgSave(\''+s.logo+'\')" style="display:flex;align-items:center;gap:8px">'+
+    '<img src="'+s.logo+'.png" loading="lazy" style="width:52px;height:30px;object-fit:contain;background:#fff;border-radius:3px;flex-shrink:0">'+
+    '<div><b>'+s.name+'</b><br><span class="dim">'+s.id+'</span></div></div>'
+  ).join('')||'<span class="dim">nothing found</span>';
+}
+function lgSave(logoUrl){
+  fetch('/api/logo_override',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({group_name:_lgName,logo_url:logoUrl})})
+  .then(r=>r.json()).then(j=>{
+    lgClose();
+    if(j.ok)setTimeout(()=>location.reload(),300);else alert(JSON.stringify(j));
+  });
+}
+</script>"""
+
 REMATCH_DIALOG = """
 <div id="rmdlg" style="display:none;position:fixed;inset:0;background:#000a;z-index:9;align-items:center;justify-content:center">
  <div style="background:#17172a;border-radius:12px;padding:18px;width:640px;max-height:80vh;overflow:auto">
@@ -236,7 +332,7 @@ function rmSave(cm){fetch('/api/rematch',{method:'POST',
 def page(active, body, pending):
     tabs = [("/", "Status"), ("/triage", f"Triage ({pending})"),
             ("/catalog", "Catalog"), ("/divergence", "Divergence"),
-            ("/decisions", "Decisions")]
+            ("/decisions", "Decisions"), ("/logo-matcher", "Logos")]
     nav = "".join(f'<a class="nav {"on" if path == active else ""}" href="{path}">{label}</a>'
                   for path, label in tabs)
     return HTMLResponse(f"<!doctype html><meta charset='utf-8'>{STYLE}"
@@ -653,6 +749,139 @@ async def api_rematch(request: Request):
     db.close()
     start_run("rematch")
     return {"ok": True, "note": "run started to apply the rematch"}
+
+
+# ------------------------------------------------------------ logo matcher
+
+@app.get("/logo-matcher", response_class=HTMLResponse)
+def logo_matcher_page(show: str = "unmatched", q: str = ""):
+    try:
+        catalog = open_catalog()
+        sets = catalog.execute(
+            "SELECT group_id, name, abbreviation, published_on, tcgdex_logo_url "
+            "FROM sealed_sets ORDER BY published_on DESC"
+        ).fetchall()
+        catalog.close()
+    except sqlite3.Error:
+        sets = []
+
+    db = open_state()
+    pending = count_pending(db)
+    db.close()
+
+    overrides = _load_logo_overrides()
+
+    rows_data = []
+    for group_id, name, abbr, pub, db_logo in sets:
+        override_logo = overrides.get(name)
+        effective = override_logo or db_logo
+        year = pub[:4] if pub else "?"
+        status = "override" if override_logo else ("auto" if db_logo else "none")
+        rows_data.append((name, abbr or "—", year, effective, status, bool(override_logo)))
+
+    if q:
+        ql = q.lower()
+        rows_data = [r for r in rows_data if ql in r[0].lower() or ql in r[1].lower()]
+
+    filtered = (
+        [r for r in rows_data if r[3] is None] if show == "unmatched" else
+        [r for r in rows_data if r[3] is not None] if show == "matched" else
+        rows_data
+    )
+
+    total = len(sets)
+    n_auto = sum(1 for r in rows_data if r[4] == "auto")
+    n_override = len(overrides)
+    n_unmatched = sum(1 for r in rows_data if r[3] is None)
+
+    def flink(s, label):
+        on = ' style="background:#6c63ff"' if show == s else ""
+        return f'<a class="nav"{on} href="/logo-matcher?show={s}&q={html.escape(q)}">{label}</a>'
+
+    STATUS_BADGE = {
+        "auto":     '<span class="ok"  style="font-size:11px">AUTO</span>',
+        "override": '<span style="color:#6c63ff;font-size:11px">OVERRIDE</span>',
+        "none":     '<span class="bad" style="font-size:11px">NONE</span>',
+    }
+    items = []
+    for name, abbr, year, effective, status, has_override in filtered:
+        logo_cell = (
+            f'<img src="{effective}.png" style="max-width:52px;max-height:30px;object-fit:contain">'
+            if effective else '<span class="dim">—</span>'
+        )
+        items.append(
+            f'<tr>'
+            f'<td><div class="imgbox" style="width:60px;height:36px;background:#fff">{logo_cell}</div></td>'
+            f'<td><b>{html.escape(name)}</b><br><span class="dim">{html.escape(abbr)} · {year}</span></td>'
+            f'<td>{STATUS_BADGE[status]}</td>'
+            f'<td><button class="ghost" style="font-size:11px;padding:3px 8px" '
+            f'onclick="lgOpen({json.dumps(name)},{json.dumps(has_override)})">'
+            f'Assign…</button></td>'
+            f'</tr>'
+        )
+
+    body = f"""<div style='padding:12px 16px'>
+<p style="display:flex;gap:20px;flex-wrap:wrap">
+  <span><b>{total}</b> <span class="dim">sets total</span></span>
+  <span class="ok"><b>{n_auto}</b> auto-matched</span>
+  <span style="color:#6c63ff"><b>{n_override}</b> override{'s' if n_override != 1 else ''}</span>
+  <span class="bad"><b>{n_unmatched}</b> unmatched</span>
+</p>
+<p style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+  {flink('unmatched', f'Unmatched ({n_unmatched})')}
+  {flink('matched', 'Matched')}
+  {flink('all', 'All')}
+  <form method="get" action="/logo-matcher" style="display:inline;margin-left:4px">
+    <input type="hidden" name="show" value="{show}">
+    <input name="q" value="{html.escape(q)}" placeholder="search name / abbr…">
+    <button>Filter</button>
+  </form>
+  <a href="/api/logo_overrides.yaml" download="logo_overrides.yaml">
+    <button class="ghost" style="font-size:11px">Download YAML</button></a>
+</p>
+<p class="dim" style="font-size:12px">
+  Assignments are saved to <code>logo_overrides.yaml</code> in the collector directory
+  and applied automatically on the next pipeline run.
+</p>
+<table>
+  <tr><th></th><th>set</th><th>status</th><th></th></tr>
+  {''.join(items) or '<tr><td colspan="4" class="dim">nothing here</td></tr>'}
+</table>
+</div>"""
+
+    return page("/logo-matcher", body + LOGO_DIALOG, pending)
+
+
+@app.get("/api/tcgdex_sets")
+def api_tcgdex_sets():
+    sets = _get_tcgdex_sets()
+    return JSONResponse([{"id": s["id"], "name": s["name"], "logo": s.get("logo")} for s in sets])
+
+
+@app.post("/api/logo_override")
+async def api_logo_override(request: Request):
+    body = await request.json()
+    group_name = (body.get("group_name") or "").strip()
+    logo_url = body.get("logo_url")  # None or "" = clear
+    if not group_name:
+        return JSONResponse({"ok": False, "error": "group_name required"})
+    overrides = _load_logo_overrides()
+    if logo_url:
+        overrides[group_name] = logo_url
+    else:
+        overrides.pop(group_name, None)
+    _save_logo_overrides(overrides)
+    return {"ok": True}
+
+
+@app.get("/api/logo_overrides.yaml")
+def api_logo_overrides_yaml():
+    if os.path.exists(LOGO_OVERRIDES_FILE):
+        with open(LOGO_OVERRIDES_FILE) as f:
+            content = f.read()
+    else:
+        content = "# no manual logo overrides yet\n"
+    return PlainTextResponse(content, media_type="text/yaml")
 
 
 # ------------------------------------------------------------ scheduler

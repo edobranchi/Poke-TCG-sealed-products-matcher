@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import difflib
 import hashlib
 import json
 import logging
@@ -30,6 +31,7 @@ import re
 import sqlite3
 import sys
 import time
+import unicodedata
 
 import requests
 import yaml
@@ -39,6 +41,8 @@ from match_cardmarket import match_group
 log = logging.getLogger("collector")
 
 TCGCSV_BASE = "https://tcgcsv.com/tcgplayer/3"  # category 3 = Pokemon
+TCGDEX_SETS_URL = "https://api.tcgdex.net/v2/en/sets"
+LOGO_OVERRIDES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo_overrides.yaml")
 CM_PRODUCTS_URL = ("https://downloads.s3.cardmarket.com/productCatalog/"
                    "productList/products_nonsingles_6.json")
 CM_PRICES_URL = ("https://downloads.s3.cardmarket.com/productCatalog/"
@@ -98,10 +102,11 @@ CM_KEEP_CATEGORIES = {
 OUTPUT_SCHEMA = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE sealed_sets (
-  group_id     INTEGER PRIMARY KEY,
-  name         TEXT NOT NULL,
-  abbreviation TEXT,
-  published_on TEXT
+  group_id          INTEGER PRIMARY KEY,
+  name              TEXT NOT NULL,
+  abbreviation      TEXT,
+  published_on      TEXT,
+  tcgdex_logo_url   TEXT
 );
 CREATE TABLE sealed_products (
   product_id    INTEGER PRIMARY KEY,
@@ -306,6 +311,125 @@ def save_cm_catalog(state_db, everything, when):
               p.get("idExpansion"), when) for p in everything])
 
 
+# ---------------------------------------------------------------- TCGDex logo lookup
+
+def _norm_name(name):
+    """Lowercase, strip accents and punctuation, drop the word 'and'
+    (so 'Black & White' and 'Black and White' both normalise to
+    'black white'), collapse whitespace."""
+    name = unicodedata.normalize("NFKD", name)
+    name = re.sub(r"[^\w\s]", "", name.lower())   # strips & → nothing
+    name = re.sub(r"\band\b", "", name)            # 'and' → same as '&'
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def fetch_tcgdex_logo_map(session):
+    """Returns {normalized_set_name: logo_url} from TCGDex /sets.
+
+    logo_url is the base URL without extension, e.g.
+    'https://assets.tcgdex.net/en/swsh/swsh3/logo'.
+    The app appends '.png' to load it via CachedNetworkImage.
+    Returns an empty dict (non-fatal) if TCGDex is unreachable.
+    """
+    try:
+        resp = session.get(TCGDEX_SETS_URL, timeout=30)
+        if resp.status_code != 200:
+            log.warning("tcgdex sets: HTTP %d — running without logos", resp.status_code)
+            return {}
+        out = {}
+        for s in resp.json():
+            key = _norm_name(s.get("name", ""))
+            if key and s.get("logo"):
+                out[key] = s["logo"]
+        log.info("tcgdex logos: %d sets indexed", len(out))
+        return out
+    except Exception as e:
+        log.warning("tcgdex logo fetch failed (%s) — running without logos", e)
+        return {}
+
+
+# Prefixes TCGCSV adds that TCGDex omits:
+#   "SV08: "  "SWSH12: "  "ME05: "  "ME: "  "SV: "
+_SERIES_PREFIX = re.compile(r"^[A-Za-z]+\d*:\s*")
+#   "SM - "  "XY - "  "SWSH - "
+_DASH_PREFIX = re.compile(r"^[A-Z]+\s+-\s+")
+#   "Sword & Shield Base Set" → "Sword & Shield"
+_BASE_SET_SUFFIX = re.compile(r"\s+base set$", re.IGNORECASE)
+
+
+def load_logo_overrides():
+    """Load manual logo assignments from logo_overrides.yaml (if present)."""
+    if not os.path.exists(LOGO_OVERRIDES_FILE):
+        return {}
+    try:
+        with open(LOGO_OVERRIDES_FILE) as f:
+            return yaml.safe_load(f) or {}
+    except Exception as e:
+        log.warning("logo_overrides load failed: %s", e)
+        return {}
+
+
+def _find_logo(name, logo_map, logo_overrides=None):
+    """Multi-stage logo lookup against the TCGDex name map.
+
+    Stages (in order, first hit wins):
+      0. Manual override from logo_overrides.yaml (exact group name match)
+      1. Full name — exact normalised match, then fuzzy (>=0.85)
+      2. Strip 'CODE: ' series prefix  (SV08: / SWSH12: / ME05: / SV: …)
+      3. Strip 'SERIES - ' dash prefix (SM - / XY - / …)
+      4. Strip ' Base Set' suffix      (Sword & Shield Base Set → …)
+
+    The 0.85 fuzzy cutoff is strict on purpose: a wrong logo is worse
+    than no logo (the app falls back to the era-colour icon).
+    """
+    if logo_overrides and name in logo_overrides:
+        return logo_overrides[name]
+    if not logo_map:
+        return None
+
+    def _try(n):
+        key = _norm_name(n)
+        if key in logo_map:
+            return logo_map[key]
+        m = difflib.get_close_matches(key, logo_map.keys(), n=1, cutoff=0.85)
+        return logo_map[m[0]] if m else None
+
+    result = _try(name)
+    if result:
+        return result
+
+    # Strip "SV08: " / "SWSH12: " / "ME05: " / "SV: " style prefixes.
+    stripped = _SERIES_PREFIX.sub("", name)
+    if stripped != name:
+        result = _try(stripped)
+        if result:
+            return result
+
+    # Strip "SM - " / "XY - " dash prefixes.
+    stripped = _DASH_PREFIX.sub("", name)
+    if stripped != name:
+        result = _try(stripped)
+        if result:
+            return result
+
+    # Strip " Base Set" suffix alone.
+    stripped = _BASE_SET_SUFFIX.sub("", name)
+    if stripped != name:
+        result = _try(stripped)
+        if result:
+            return result
+
+    # Strip BOTH series prefix AND base-set suffix — handles
+    # "SV01: Scarlet & Violet Base Set" → "Scarlet & Violet".
+    stripped = _BASE_SET_SUFFIX.sub("", _SERIES_PREFIX.sub("", name))
+    if stripped != name:
+        result = _try(stripped)
+        if result:
+            return result
+
+    return None
+
+
 # ---------------------------------------------------------------- matching
 
 def match_all(sets, products, cm_products, overrides):
@@ -386,7 +510,9 @@ def build_output(state_db, out_dir, today, sets, products, tp_prices,
         os.remove(tmp_path)
     out = sqlite3.connect(tmp_path)
     out.executescript(OUTPUT_SCHEMA)
-    out.executemany("INSERT INTO sealed_sets VALUES (:group_id,:name,:abbreviation,:published_on)", sets)
+    out.executemany(
+        "INSERT INTO sealed_sets VALUES (:group_id,:name,:abbreviation,:published_on,:tcgdex_logo_url)",
+        sets)
 
     priced_count = 0
     for product in products:
@@ -543,8 +669,18 @@ def run(out_dir="out", state_path="collector_state.db", limit_groups=None,
         session.headers["User-Agent"] = USER_AGENT
         today = dt.date.today().isoformat()
 
+        stage = "tcgdex_logos"
+        logo_map = fetch_tcgdex_logo_map(session)
+        logo_overrides = load_logo_overrides()
+        if logo_overrides:
+            log.info("logo_overrides: %d manual assignment(s)", len(logo_overrides))
+
         stage = "tcgcsv"
         sets, products, tp_prices, dropped, unpriced = fetch_tcgplayer(session, limit_groups)
+
+        # Enrich each set with a TCGDex logo URL (None when no match found).
+        for s in sets:
+            s["tcgdex_logo_url"] = _find_logo(s["name"], logo_map, logo_overrides)
 
         stage = "gate"
         decisions, _ = load_decisions(state_db, out_dir, products)
