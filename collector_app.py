@@ -763,10 +763,11 @@ async def api_rematch(request: Request):
 def logo_matcher_page(show: str = "unmatched", q: str = ""):
     try:
         catalog = open_catalog()
-        sets = catalog.execute(
-            "SELECT group_id, name, abbreviation, published_on, tcgdex_logo_url "
-            "FROM sealed_sets ORDER BY published_on DESC"
-        ).fetchall()
+        catalog.row_factory = sqlite3.Row
+        sets = [dict(r) for r in catalog.execute(
+            "SELECT * FROM sealed_sets ORDER BY published_on DESC"
+        ).fetchall()]
+        catalog.row_factory = None
         catalog.close()
     except sqlite3.Error:
         sets = []
@@ -778,7 +779,12 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
     overrides = _load_logo_overrides()
 
     rows_data = []
-    for group_id, name, abbr, pub, db_logo, db_set_id in sets:
+    for row in sets:
+        name = row["name"]
+        abbr = row.get("abbreviation") or "—"
+        pub = row.get("published_on") or ""
+        db_logo = row.get("tcgdex_logo_url")
+        db_set_id = row.get("tcgdex_set_id")  # None on old DB without this column
         entry = overrides.get(name)  # {logo_url, tcgdex_set_id} or None
         override_logo = entry.get("logo_url") if entry else None
         override_set_id = entry.get("tcgdex_set_id") if entry else None
@@ -786,7 +792,7 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
         effective_set_id = override_set_id or db_set_id
         year = pub[:4] if pub else "?"
         status = "override" if entry else ("auto" if db_logo else "none")
-        rows_data.append((name, abbr or "—", year, effective_logo, effective_set_id, status, bool(entry)))
+        rows_data.append((name, abbr, year, effective_logo, effective_set_id, status, bool(entry)))
 
     if q:
         ql = q.lower()
