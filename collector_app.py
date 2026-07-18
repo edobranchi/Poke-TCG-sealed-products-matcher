@@ -59,8 +59,9 @@ _tcgdex_sets_at: float = 0.0
 
 def _load_logo_overrides() -> dict:
     """Returns {"groups": {group_name: {logo_url, tcgdex_set_id}},
-                "virtual_sets": {id: {display_name, logo_url}}}."""
-    empty: dict = {"groups": {}, "virtual_sets": {}}
+                "virtual_sets": {id: {display_name, logo_url}},
+                "default_logo_url": str|None}."""
+    empty: dict = {"groups": {}, "virtual_sets": {}, "default_logo_url": None}
     try:
         if os.path.exists(LOGO_OVERRIDES_FILE):
             with open(LOGO_OVERRIDES_FILE) as f:
@@ -73,8 +74,10 @@ def _load_logo_overrides() -> dict:
                 return {
                     "groups": {k: _up(v) for k, v in (raw.get("groups") or {}).items()},
                     "virtual_sets": raw.get("virtual_sets") or {},
+                    "default_logo_url": raw.get("default_logo_url"),
                 }
-            return {"groups": {k: _up(v) for k, v in raw.items()}, "virtual_sets": {}}
+            return {"groups": {k: _up(v) for k, v in raw.items()}, "virtual_sets": {},
+                    "default_logo_url": None}
     except Exception as e:
         print(f"[logo] load overrides failed: {e}")
     return empty
@@ -805,6 +808,7 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
     data = _load_logo_overrides()
     group_overrides = data["groups"]
     virtual_sets = data["virtual_sets"]
+    default_logo_url = data.get("default_logo_url")
 
     rows_data = []
     for row in sets:
@@ -818,9 +822,11 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
         override_set_id = entry.get("tcgdex_set_id") if entry else None
         effective_logo = override_logo or db_logo
         effective_set_id = override_set_id or db_set_id
+        # display_logo: for UI preview only — falls back to default; does NOT affect DB or status badge
+        display_logo = effective_logo or default_logo_url
         year = pub[:4] if pub else "?"
         status = "override" if entry else ("auto" if db_logo else "none")
-        rows_data.append((name, abbr, year, effective_logo, effective_set_id, status, bool(entry)))
+        rows_data.append((name, abbr, year, effective_logo, effective_set_id, status, bool(entry), display_logo))
 
     if q:
         ql = q.lower()
@@ -848,10 +854,10 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
         "none":     '<span class="bad" style="font-size:11px">NONE</span>',
     }
     items = []
-    for name, abbr, year, effective_logo, effective_set_id, status, has_override in filtered:
+    for name, abbr, year, effective_logo, effective_set_id, status, has_override, display_logo in filtered:
         logo_cell = (
-            f'<img src="{effective_logo}.png" style="max-width:52px;max-height:30px;object-fit:contain">'
-            if effective_logo else '<span class="dim">—</span>'
+            f'<img src="{display_logo}.png" style="max-width:52px;max-height:30px;object-fit:contain">'
+            if display_logo else '<span class="dim">—</span>'
         )
         set_id_cell = (f'<span class="dim" style="font-size:11px">{html.escape(effective_set_id)}</span>'
                        if effective_set_id else '')
@@ -868,15 +874,32 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
             f'</tr>'
         )
 
+    def _vs_logo_cell(v):
+        url = v.get("logo_url")
+        if url:
+            return f'<img src="{url}.png" style="max-height:24px;max-width:44px;object-fit:contain;background:#fff;border-radius:3px;vertical-align:middle">'
+        return '<span class="dim">—</span>'
+
     # virtual sets panel rows
-    vs_rows = "".join(
-        f'<tr><td><b>{html.escape(v.get("display_name", vid))}</b></td>'
-        f'<td><span class="dim">custom:{html.escape(vid)}</span></td>'
-        f'<td>{sum(1 for r in rows_data if r[4] == "custom:"+vid)} groups assigned</td>'
-        f'<td><button class="ghost" style="font-size:11px;padding:3px 8px" '
-        f'onclick="vsDelete({html.escape(json.dumps(vid))})">Delete</button></td></tr>'
-        for vid, v in virtual_sets.items()
-    )
+    def _vs_row(vid, v):
+        vid_j = html.escape(json.dumps(vid))
+        logo_j = html.escape(json.dumps(v.get("logo_url") or ""))
+        n_assigned = sum(1 for r in rows_data if r[4] == "custom:" + vid)
+        return (
+            f'<tr>'
+            f'<td>{_vs_logo_cell(v)}</td>'
+            f'<td><b>{html.escape(v.get("display_name", vid))}</b>'
+            f' <span class="dim" style="font-size:11px">custom:{html.escape(vid)}</span></td>'
+            f'<td>{n_assigned} groups</td>'
+            f'<td style="display:flex;gap:4px">'
+            f'<button class="ghost" style="font-size:11px;padding:3px 8px" '
+            f'onclick="vsEditLogo({vid_j},{logo_j})">Edit logo</button>'
+            f'<button class="ghost" style="font-size:11px;padding:3px 8px" '
+            f'onclick="vsDelete({vid_j})">Delete</button>'
+            f'</td></tr>'
+        )
+    vs_rows = "".join(_vs_row(vid, v) for vid, v in virtual_sets.items())
+    def_logo_val = html.escape(default_logo_url or "")
     vs_panel = f"""
 <details open style="margin-bottom:12px">
   <summary style="cursor:pointer;font-weight:600;color:#6c63ff;margin-bottom:8px">
@@ -884,15 +907,22 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
     — virtual sets not in TCGDex or TCGCSV</span>
   </summary>
   <table style="margin-bottom:8px">
-    <tr><th>display name</th><th>id</th><th>coverage</th><th></th></tr>
+    <tr><th></th><th>display name</th><th>coverage</th><th></th></tr>
     {vs_rows or '<tr><td colspan="4" class="dim">none yet</td></tr>'}
   </table>
   <form onsubmit="vsCreate(event)" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-    <input name="display_name" placeholder="Display name (e.g. McDonald's)" size="24" required>
-    <input name="id" placeholder="ID slug (e.g. mcdonalds)" size="16" required>
-    <input name="logo_url" placeholder="Logo URL (optional, no extension)" size="36">
+    <input name="display_name" placeholder="Display name (e.g. McDonald's)" size="22" required>
+    <input name="id" placeholder="ID slug (e.g. mcdonalds)" size="14" required>
+    <input name="logo_url" placeholder="Logo base URL (optional, no .png)" size="36">
     <button type="submit">+ Create</button>
   </form>
+  <p style="margin-top:10px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+    <span class="dim" style="font-size:12px">Default logo for unmatched sets:</span>
+    <input id="defLogoInput" value="{def_logo_val}" placeholder="base URL without .png" size="44">
+    <button onclick="saveDefLogo()" type="button">Save</button>
+    {f'<img src="{def_logo_val}.png" style="max-height:22px;max-width:40px;object-fit:contain;background:#fff;border-radius:3px">' if default_logo_url else ''}
+  </p>
+</details>
 </details>"""
 
     # raw JSON for inline <script> — do NOT html.escape here (that breaks JS)
@@ -944,6 +974,19 @@ function vsDelete(id){{
     body:JSON.stringify({{action:'delete',id:id}})}})
   .then(r=>r.json()).then(j=>{{if(j.ok)location.reload();else alert(j.error)}});
 }}
+function vsEditLogo(id,current){{
+  const url=prompt('Logo base URL (no .png)\\nLeave empty to clear:',current||'');
+  if(url===null)return;
+  fetch('/api/virtual_set',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{action:'set_logo',id:id,logo_url:url||null}})}})
+  .then(r=>r.json()).then(j=>{{if(j.ok)location.reload();else alert(j.error)}});
+}}
+function saveDefLogo(){{
+  const url=document.getElementById('defLogoInput').value.trim();
+  fetch('/api/default_logo',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{logo_url:url||null}})}})
+  .then(r=>r.json()).then(j=>{{if(j.ok)location.reload();else alert(j.error)}});
+}}
 </script>
 </div>"""
 
@@ -992,8 +1035,22 @@ async def api_virtual_set(request: Request):
         for g in data["groups"].values():
             if g.get("tcgdex_set_id") == full_id:
                 g["tcgdex_set_id"] = None
+    elif action == "set_logo":
+        vs_id = (body.get("id") or "").strip()
+        if vs_id not in data["virtual_sets"]:
+            return JSONResponse({"ok": False, "error": "virtual set not found"})
+        data["virtual_sets"][vs_id]["logo_url"] = body.get("logo_url") or None
     else:
         return JSONResponse({"ok": False, "error": "unknown action"})
+    _save_logo_overrides(data)
+    return {"ok": True}
+
+
+@app.post("/api/default_logo")
+async def api_default_logo(request: Request):
+    body = await request.json()
+    data = _load_logo_overrides()
+    data["default_logo_url"] = body.get("logo_url") or None
     _save_logo_overrides(data)
     return {"ok": True}
 

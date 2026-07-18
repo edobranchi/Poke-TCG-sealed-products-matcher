@@ -367,10 +367,11 @@ def load_logo_overrides():
     """Load manual assignments from logo_overrides.yaml.
 
     Returns {"groups": {group_name: {logo_url, tcgdex_set_id}},
-             "virtual_sets": {id: {display_name, logo_url}}}.
+             "virtual_sets": {id: {display_name, logo_url}},
+             "default_logo_url": str|None}.
     Old flat and semi-flat formats are upgraded transparently.
     """
-    empty = {"groups": {}, "virtual_sets": {}}
+    empty = {"groups": {}, "virtual_sets": {}, "default_logo_url": None}
     if not os.path.exists(LOGO_OVERRIDES_FILE):
         return empty
     try:
@@ -384,9 +385,11 @@ def load_logo_overrides():
             return {
                 "groups": {k: _upgrade_group(v) for k, v in (raw.get("groups") or {}).items()},
                 "virtual_sets": raw.get("virtual_sets") or {},
+                "default_logo_url": raw.get("default_logo_url"),
             }
         # Old flat format: entire file was {group_name: url_or_dict}
-        return {"groups": {k: _upgrade_group(v) for k, v in raw.items()}, "virtual_sets": {}}
+        return {"groups": {k: _upgrade_group(v) for k, v in raw.items()}, "virtual_sets": {},
+                "default_logo_url": None}
     except Exception as e:
         log.warning("logo_overrides load failed: %s", e)
         return empty
@@ -704,10 +707,13 @@ def run(out_dir="out", state_path="collector_state.db", limit_groups=None,
         overrides_data = load_logo_overrides()
         logo_overrides = overrides_data["groups"]
         virtual_sets = overrides_data["virtual_sets"]
+        default_logo_url = overrides_data.get("default_logo_url")
         if logo_overrides:
             log.info("logo_overrides: %d group assignment(s)", len(logo_overrides))
         if virtual_sets:
             log.info("virtual_sets: %d custom grouping(s)", len(virtual_sets))
+        if default_logo_url:
+            log.info("default_logo_url set: %s", default_logo_url)
 
         stage = "tcgcsv"
         sets, products, tp_prices, dropped, unpriced = fetch_tcgplayer(session, limit_groups)
@@ -715,7 +721,7 @@ def run(out_dir="out", state_path="collector_state.db", limit_groups=None,
         # Enrich each set with a TCGDex logo URL + set ID (None when no match found).
         for s in sets:
             logo_url, set_id = _find_logo(s["name"], logo_map, logo_overrides)
-            s["tcgdex_logo_url"] = logo_url
+            s["tcgdex_logo_url"] = logo_url or default_logo_url
             s["tcgdex_set_id"] = set_id
 
         stage = "gate"
