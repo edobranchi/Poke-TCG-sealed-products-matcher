@@ -42,7 +42,24 @@ log = logging.getLogger("collector")
 
 TCGCSV_BASE = "https://tcgcsv.com/tcgplayer/3"  # category 3 = Pokemon
 TCGDEX_SETS_URL = "https://api.tcgdex.net/v2/en/sets"
-LOGO_OVERRIDES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo_overrides.yaml")
+# Same persisted path resolution as collector_app.py: explicit env →
+# /data/logo_overrides.yaml when the mounted volume exists (container) →
+# next to the source (local dev). Keeps the build reading the SAME config the
+# console writes, regardless of how the container is launched.
+_LEGACY_LOGO_OVERRIDES_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "logo_overrides.yaml")
+
+
+def _resolve_logo_overrides_file():
+    explicit = os.environ.get("LOGO_OVERRIDES_FILE")
+    if explicit:
+        return explicit
+    if os.path.isdir("/data"):
+        return "/data/logo_overrides.yaml"
+    return _LEGACY_LOGO_OVERRIDES_FILE
+
+
+LOGO_OVERRIDES_FILE = _resolve_logo_overrides_file()
 CM_PRODUCTS_URL = ("https://downloads.s3.cardmarket.com/productCatalog/"
                    "productList/products_nonsingles_6.json")
 CM_PRICES_URL = ("https://downloads.s3.cardmarket.com/productCatalog/"
@@ -372,10 +389,14 @@ def load_logo_overrides():
     Old flat and semi-flat formats are upgraded transparently.
     """
     empty = {"groups": {}, "virtual_sets": {}, "default_logo_url": None}
-    if not os.path.exists(LOGO_OVERRIDES_FILE):
+    path = LOGO_OVERRIDES_FILE
+    if not os.path.exists(path) and os.path.exists(_LEGACY_LOGO_OVERRIDES_FILE) \
+            and _LEGACY_LOGO_OVERRIDES_FILE != LOGO_OVERRIDES_FILE:
+        path = _LEGACY_LOGO_OVERRIDES_FILE
+    if not os.path.exists(path):
         return empty
     try:
-        with open(LOGO_OVERRIDES_FILE) as f:
+        with open(path) as f:
             raw = yaml.safe_load(f) or {}
 
         def _upgrade_group(v):

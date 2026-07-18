@@ -52,7 +52,29 @@ CM_URL = "https://www.cardmarket.com/en/Pokemon/Products?idProduct={}"
 app = FastAPI(title="sealed-collector")
 run_lock = threading.Lock()
 
-LOGO_OVERRIDES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo_overrides.yaml")
+# Persist the manual logo/virtual-set config on the mounted /data volume (like
+# STATE_DB/OUT_DIR) — NOT next to the source, which lives on the container's
+# ephemeral image layer and is wiped on every restart/rebuild (that was the
+# "creating a second virtual set resets the first" bug: each restart started
+# from an empty file). Resolution order: explicit LOGO_OVERRIDES_FILE env →
+# /data/logo_overrides.yaml when the mounted volume exists (container) →
+# next to the source (local dev). The middle branch means the OMV deployment
+# persists correctly even though it runs the base image + git-pull (no build,
+# so the Dockerfile ENV below isn't guaranteed to apply).
+_LEGACY_LOGO_OVERRIDES_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "logo_overrides.yaml")
+
+
+def _resolve_logo_overrides_file() -> str:
+    explicit = os.environ.get("LOGO_OVERRIDES_FILE")
+    if explicit:
+        return explicit
+    if os.path.isdir("/data"):
+        return "/data/logo_overrides.yaml"
+    return _LEGACY_LOGO_OVERRIDES_FILE
+
+
+LOGO_OVERRIDES_FILE = _resolve_logo_overrides_file()
 _tcgdex_sets_cache: list | None = None
 _tcgdex_sets_at: float = 0.0
 
@@ -62,9 +84,15 @@ def _load_logo_overrides() -> dict:
                 "virtual_sets": {id: {display_name, logo_url}},
                 "default_logo_url": str|None}."""
     empty: dict = {"groups": {}, "virtual_sets": {}, "default_logo_url": None}
+    # Prefer the persisted file; fall back to the legacy in-image path once so
+    # an existing config migrates onto /data the next time we save.
+    path = LOGO_OVERRIDES_FILE
+    if not os.path.exists(path) and os.path.exists(_LEGACY_LOGO_OVERRIDES_FILE) \
+            and _LEGACY_LOGO_OVERRIDES_FILE != LOGO_OVERRIDES_FILE:
+        path = _LEGACY_LOGO_OVERRIDES_FILE
     try:
-        if os.path.exists(LOGO_OVERRIDES_FILE):
-            with open(LOGO_OVERRIDES_FILE) as f:
+        if os.path.exists(path):
+            with open(path) as f:
                 raw = yaml.safe_load(f) or {}
 
             def _up(v):

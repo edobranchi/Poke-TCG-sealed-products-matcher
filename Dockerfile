@@ -9,6 +9,7 @@ COPY *.py ./
 # state and output live on a mounted volume so they survive rebuilds
 ENV OUT_DIR=/data/out \
     STATE_DB=/data/collector_state.db \
+    LOGO_OVERRIDES_FILE=/data/logo_overrides.yaml \
     PORT=8811
 
 EXPOSE 8811
