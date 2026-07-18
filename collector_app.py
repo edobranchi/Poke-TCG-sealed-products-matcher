@@ -134,12 +134,12 @@ def run_pipeline(reason):
                     db.execute("UPDATE runs SET message=? WHERE id=(SELECT MAX(id) FROM runs)",
                                (f"validate: {summary} (exit {check.returncode}) | {pub_note}",))
                 db.close()
-                log.info("publish: %s", pub_note)
+                print(f"[console] publish: {pub_note}")
                 if published:
                     notify.run_ok(version, report["products"], report["cm_matched"],
-                                  report["pending"], CONSOLE_URL)
+                                  report["pending"], CONSOLE_URL, out_dir=OUT_DIR)
             except Exception as pub_err:
-                log.warning("publish failed: %s", pub_err)
+                print(f"[console] publish failed: {pub_err}")
                 db = open_state()
                 with db:
                     db.execute("UPDATE runs SET message=? WHERE id=(SELECT MAX(id) FROM runs)",
@@ -150,7 +150,7 @@ def run_pipeline(reason):
             # publish off but run succeeded - still notify if there's new triage items
             if report["pending"]:
                 notify.run_ok(version, report["products"], report["cm_matched"],
-                              report["pending"], CONSOLE_URL)
+                              report["pending"], CONSOLE_URL, out_dir=OUT_DIR)
         return {"ok": True, "version": version, "validate_exit": check.returncode}
     except Exception as e:
         notify.run_failed("pipeline", str(e))

@@ -15,6 +15,7 @@ the pipeline keeps running regardless.
 """
 
 import os
+import sqlite3
 import logging
 import requests
 
@@ -41,15 +42,44 @@ def send(text):
         log.warning("telegram notification failed: %s", e)
 
 
-def run_ok(version, products, matched, pending, console_url):
+def _price_stats(out_dir):
+    """Quick breakdown from the published DB: both/tp-only/cm-only/unpriced."""
+    try:
+        db = sqlite3.connect(os.path.join(out_dir, "sealed_prices.db"))
+        both, tp_only, cm_only, unpriced = db.execute("""
+            SELECT
+              SUM(CASE WHEN l.tcgplayer_market IS NOT NULL AND l.cardmarket_trend IS NOT NULL THEN 1 ELSE 0 END),
+              SUM(CASE WHEN l.tcgplayer_market IS NOT NULL AND l.cardmarket_trend IS NULL     THEN 1 ELSE 0 END),
+              SUM(CASE WHEN l.tcgplayer_market IS NULL     AND l.cardmarket_trend IS NOT NULL THEN 1 ELSE 0 END),
+              SUM(CASE WHEN l.tcgplayer_market IS NULL     AND l.cardmarket_trend IS NULL     THEN 1 ELSE 0 END)
+            FROM sealed_products p
+            LEFT JOIN sealed_latest_prices l USING(product_id)
+            WHERE p.us_exclusive = 0
+        """).fetchone()
+        db.close()
+        return int(both or 0), int(tp_only or 0), int(cm_only or 0), int(unpriced or 0)
+    except Exception:
+        return None, None, None, None
+
+
+def run_ok(version, products, matched, pending, console_url, out_dir=None):
+    both, tp_only, cm_only, no_price = _price_stats(out_dir) if out_dir else (None,)*4
+
     lines = [
         "✅ <b>Sealed collector — run ok</b>",
-        f"version {version} · {products} products · {matched} CM-matched",
+        f"📦 version {version} · {products} products",
     ]
+    if both is not None:
+        lines.append(
+            f"💰 <b>$+€</b> {both}  |  <b>$only</b> {tp_only}  |  <b>€only</b> {cm_only}  |  <b>unpriced</b> {no_price}")
+    else:
+        lines.append(f"🔗 CM-matched: {matched}")
+
     if pending:
         lines.append(
-            f"🔔 <b>{pending} new product{'s' if pending > 1 else ''} waiting in triage</b>\n"
-            f"<a href='{console_url}/triage'>Review in console →</a>")
+            f"\n🔔 <b>{pending} new product{'s' if pending > 1 else ''} in triage</b>\n"
+            f"<a href='{console_url}/triage'>Review →</a>")
+
     send("\n".join(lines))
 
 
