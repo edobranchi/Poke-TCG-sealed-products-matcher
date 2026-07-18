@@ -888,17 +888,18 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
     {vs_rows or '<tr><td colspan="4" class="dim">none yet</td></tr>'}
   </table>
   <form onsubmit="vsCreate(event)" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-    <input name="display_name" placeholder="Display name (e.g. McDonald's)" size="28" required>
-    <input name="id" placeholder="ID slug (e.g. mcdonalds)" size="18" required>
+    <input name="display_name" placeholder="Display name (e.g. McDonald's)" size="24" required>
+    <input name="id" placeholder="ID slug (e.g. mcdonalds)" size="16" required>
+    <input name="logo_url" placeholder="Logo URL (optional, no extension)" size="36">
     <button type="submit">+ Create</button>
   </form>
 </details>"""
 
-    # pass virtual sets to the JS picker as a JSON array
-    vs_json = html.escape(json.dumps([
+    # raw JSON for inline <script> — do NOT html.escape here (that breaks JS)
+    vs_json = json.dumps([
         {"id": vid, "display_name": v.get("display_name", vid), "logo_url": v.get("logo_url")}
         for vid, v in virtual_sets.items()
-    ]))
+    ])
 
     body = f"""<div style='padding:12px 16px'>
 <p style="display:flex;gap:20px;flex-wrap:wrap">
@@ -934,7 +935,7 @@ function vsCreate(e){{
   e.preventDefault();
   const f=e.target;
   fetch('/api/virtual_set',{{method:'POST',headers:{{'Content-Type':'application/json'}},
-    body:JSON.stringify({{action:'create',display_name:f.display_name.value,id:f.id.value}})}})
+    body:JSON.stringify({{action:'create',display_name:f.display_name.value,id:f.id.value,logo_url:f.logo_url.value||null}})}})
   .then(r=>r.json()).then(j=>{{if(j.ok)location.reload();else alert(j.error)}});
 }}
 function vsDelete(id){{
