@@ -106,7 +106,8 @@ CREATE TABLE sealed_sets (
   name              TEXT NOT NULL,
   abbreviation      TEXT,
   published_on      TEXT,
-  tcgdex_logo_url   TEXT
+  tcgdex_logo_url   TEXT,
+  tcgdex_set_id     TEXT
 );
 CREATE TABLE sealed_products (
   product_id    INTEGER PRIMARY KEY,
@@ -324,7 +325,7 @@ def _norm_name(name):
 
 
 def fetch_tcgdex_logo_map(session):
-    """Returns {normalized_set_name: logo_url} from TCGDex /sets.
+    """Returns {normalized_set_name: (logo_url, set_id)} from TCGDex /sets.
 
     logo_url is the base URL without extension, e.g.
     'https://assets.tcgdex.net/en/swsh/swsh3/logo'.
@@ -340,7 +341,7 @@ def fetch_tcgdex_logo_map(session):
         for s in resp.json():
             key = _norm_name(s.get("name", ""))
             if key and s.get("logo"):
-                out[key] = s["logo"]
+                out[key] = (s["logo"], s["id"])
         log.info("tcgdex logos: %d sets indexed", len(out))
         return out
     except Exception as e:
@@ -358,12 +359,24 @@ _BASE_SET_SUFFIX = re.compile(r"\s+base set$", re.IGNORECASE)
 
 
 def load_logo_overrides():
-    """Load manual logo assignments from logo_overrides.yaml (if present)."""
+    """Load manual logo assignments from logo_overrides.yaml (if present).
+
+    Returns {group_name: {logo_url: str, tcgdex_set_id: str}}.
+    Old flat format ({group_name: logo_url_str}) is tolerated and upgraded.
+    """
     if not os.path.exists(LOGO_OVERRIDES_FILE):
         return {}
     try:
         with open(LOGO_OVERRIDES_FILE) as f:
-            return yaml.safe_load(f) or {}
+            raw = yaml.safe_load(f) or {}
+        # Upgrade old flat format: {name: url_str} → {name: {logo_url, tcgdex_set_id}}
+        out = {}
+        for k, v in raw.items():
+            if isinstance(v, str):
+                out[k] = {"logo_url": v, "tcgdex_set_id": None}
+            else:
+                out[k] = v
+        return out
     except Exception as e:
         log.warning("logo_overrides load failed: %s", e)
         return {}
@@ -371,6 +384,8 @@ def load_logo_overrides():
 
 def _find_logo(name, logo_map, logo_overrides=None):
     """Multi-stage logo lookup against the TCGDex name map.
+
+    Returns (logo_url, tcgdex_set_id) — both None when nothing matches.
 
     Stages (in order, first hit wins):
       0. Manual override from logo_overrides.yaml (exact group name match)
@@ -383,14 +398,15 @@ def _find_logo(name, logo_map, logo_overrides=None):
     than no logo (the app falls back to the era-colour icon).
     """
     if logo_overrides and name in logo_overrides:
-        return logo_overrides[name]
+        entry = logo_overrides[name]
+        return entry.get("logo_url"), entry.get("tcgdex_set_id")
     if not logo_map:
         return None
 
     def _try(n):
         key = _norm_name(n)
         if key in logo_map:
-            return logo_map[key]
+            return logo_map[key]  # (logo_url, set_id)
         m = difflib.get_close_matches(key, logo_map.keys(), n=1, cutoff=0.85)
         return logo_map[m[0]] if m else None
 
@@ -427,7 +443,7 @@ def _find_logo(name, logo_map, logo_overrides=None):
         if result:
             return result
 
-    return None
+    return None, None
 
 
 # ---------------------------------------------------------------- matching
@@ -511,7 +527,7 @@ def build_output(state_db, out_dir, today, sets, products, tp_prices,
     out = sqlite3.connect(tmp_path)
     out.executescript(OUTPUT_SCHEMA)
     out.executemany(
-        "INSERT INTO sealed_sets VALUES (:group_id,:name,:abbreviation,:published_on,:tcgdex_logo_url)",
+        "INSERT INTO sealed_sets VALUES (:group_id,:name,:abbreviation,:published_on,:tcgdex_logo_url,:tcgdex_set_id)",
         sets)
 
     priced_count = 0
@@ -678,9 +694,11 @@ def run(out_dir="out", state_path="collector_state.db", limit_groups=None,
         stage = "tcgcsv"
         sets, products, tp_prices, dropped, unpriced = fetch_tcgplayer(session, limit_groups)
 
-        # Enrich each set with a TCGDex logo URL (None when no match found).
+        # Enrich each set with a TCGDex logo URL + set ID (None when no match found).
         for s in sets:
-            s["tcgdex_logo_url"] = _find_logo(s["name"], logo_map, logo_overrides)
+            logo_url, set_id = _find_logo(s["name"], logo_map, logo_overrides)
+            s["tcgdex_logo_url"] = logo_url
+            s["tcgdex_set_id"] = set_id
 
         stage = "gate"
         decisions, _ = load_decisions(state_db, out_dir, products)

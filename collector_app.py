@@ -57,10 +57,15 @@ _tcgdex_sets_at: float = 0.0
 
 
 def _load_logo_overrides() -> dict:
+    """Returns {group_name: {logo_url, tcgdex_set_id}}. Old flat format upgraded."""
     try:
         if os.path.exists(LOGO_OVERRIDES_FILE):
             with open(LOGO_OVERRIDES_FILE) as f:
-                return yaml.safe_load(f) or {}
+                raw = yaml.safe_load(f) or {}
+            out = {}
+            for k, v in raw.items():
+                out[k] = v if isinstance(v, dict) else {"logo_url": v, "tcgdex_set_id": None}
+            return out
     except Exception as e:
         print(f"[logo] load overrides failed: {e}")
     return {}
@@ -251,7 +256,7 @@ function lgOpen(name,hasOverride){
   document.getElementById('lgq').value='';
   document.getElementById('lgdlg').style.display='flex';
   document.getElementById('lgclear').innerHTML=hasOverride
-    ?'<button class="ghost" onclick="lgSave(null)">Clear override (revert to auto-match)</button>':'';
+    ?'<button class="ghost" onclick="lgSave(null,null)">Clear override (revert to auto-match)</button>':'';
   if(_lgSets){lgFilter();return}
   document.getElementById('lgsets').innerHTML='<span class="dim">Loading TCGDex sets…</span>';
   fetch('/api/tcgdex_sets').then(r=>r.json()).then(sets=>{
@@ -269,10 +274,10 @@ function lgFilter(){
     '<div><b>'+s.name+'</b><br><span class="dim">'+s.id+'</span></div></div>'
   ).join('')||'<span class="dim">nothing found</span>';
 }
-function lgPickIdx(i){lgSave(_lgFiltered[i].logo)}
-function lgSave(logoUrl){
+function lgPickIdx(i){const s=_lgFiltered[i];lgSave(s.logo,s.id)}
+function lgSave(logoUrl,setId){
   fetch('/api/logo_override',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({group_name:_lgName,logo_url:logoUrl})})
+    body:JSON.stringify({group_name:_lgName,logo_url:logoUrl||null,tcgdex_set_id:setId||null})})
   .then(r=>r.json()).then(j=>{
     lgClose();
     if(j.ok)setTimeout(()=>location.reload(),300);else alert(JSON.stringify(j));
@@ -773,12 +778,15 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
     overrides = _load_logo_overrides()
 
     rows_data = []
-    for group_id, name, abbr, pub, db_logo in sets:
-        override_logo = overrides.get(name)
-        effective = override_logo or db_logo
+    for group_id, name, abbr, pub, db_logo, db_set_id in sets:
+        entry = overrides.get(name)  # {logo_url, tcgdex_set_id} or None
+        override_logo = entry.get("logo_url") if entry else None
+        override_set_id = entry.get("tcgdex_set_id") if entry else None
+        effective_logo = override_logo or db_logo
+        effective_set_id = override_set_id or db_set_id
         year = pub[:4] if pub else "?"
-        status = "override" if override_logo else ("auto" if db_logo else "none")
-        rows_data.append((name, abbr or "—", year, effective, status, bool(override_logo)))
+        status = "override" if entry else ("auto" if db_logo else "none")
+        rows_data.append((name, abbr or "—", year, effective_logo, effective_set_id, status, bool(entry)))
 
     if q:
         ql = q.lower()
@@ -791,7 +799,7 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
     )
 
     total = len(sets)
-    n_auto = sum(1 for r in rows_data if r[4] == "auto")
+    n_auto = sum(1 for r in rows_data if r[5] == "auto")
     n_override = len(overrides)
     n_unmatched = sum(1 for r in rows_data if r[3] is None)
 
@@ -805,15 +813,19 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
         "none":     '<span class="bad" style="font-size:11px">NONE</span>',
     }
     items = []
-    for name, abbr, year, effective, status, has_override in filtered:
+    for name, abbr, year, effective_logo, effective_set_id, status, has_override in filtered:
         logo_cell = (
-            f'<img src="{effective}.png" style="max-width:52px;max-height:30px;object-fit:contain">'
-            if effective else '<span class="dim">—</span>'
+            f'<img src="{effective_logo}.png" style="max-width:52px;max-height:30px;object-fit:contain">'
+            if effective_logo else '<span class="dim">—</span>'
         )
+        set_id_cell = (f'<span class="dim" style="font-size:11px">{html.escape(effective_set_id)}</span>'
+                       if effective_set_id else '')
         items.append(
             f'<tr>'
             f'<td><div class="imgbox" style="width:60px;height:36px;background:#fff">{logo_cell}</div></td>'
-            f'<td><b>{html.escape(name)}</b><br><span class="dim">{html.escape(abbr)} · {year}</span></td>'
+            f'<td><b>{html.escape(name)}</b><br>'
+            f'<span class="dim">{html.escape(abbr)} · {year}</span>'
+            f'{" · " + set_id_cell if set_id_cell else ""}</td>'
             f'<td>{STATUS_BADGE[status]}</td>'
             f'<td><button class="ghost" style="font-size:11px;padding:3px 8px" '
             f'onclick="lgOpen({html.escape(json.dumps(name))},{str(has_override).lower()})">'
@@ -863,12 +875,13 @@ def api_tcgdex_sets():
 async def api_logo_override(request: Request):
     body = await request.json()
     group_name = (body.get("group_name") or "").strip()
-    logo_url = body.get("logo_url")  # None or "" = clear
+    logo_url = body.get("logo_url") or None
+    tcgdex_set_id = body.get("tcgdex_set_id") or None
     if not group_name:
         return JSONResponse({"ok": False, "error": "group_name required"})
     overrides = _load_logo_overrides()
-    if logo_url:
-        overrides[group_name] = logo_url
+    if logo_url or tcgdex_set_id:
+        overrides[group_name] = {"logo_url": logo_url, "tcgdex_set_id": tcgdex_set_id}
     else:
         overrides.pop(group_name, None)
     _save_logo_overrides(overrides)
