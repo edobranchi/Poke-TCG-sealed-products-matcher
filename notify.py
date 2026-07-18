@@ -7,7 +7,7 @@ Sends a message to your Telegram chat when interesting things happen:
   - publish failed
 
 Credentials come from env vars only — never hardcoded, never committed:
-  TELEGRAM_TOKEN   — bot token from @BotFather
+  TELEGRAM_BOT_TOKEN   — bot token from @BotFather
   TELEGRAM_CHAT_ID — your personal chat id
 
 If either env var is missing, all calls are silent no-ops so the rest of
@@ -20,7 +20,7 @@ import requests
 
 log = logging.getLogger("notify")
 
-_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 _CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 _API = "https://api.telegram.org/bot{token}/sendMessage"
 
