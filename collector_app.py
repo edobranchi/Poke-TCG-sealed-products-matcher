@@ -28,6 +28,7 @@ import threading
 
 import time
 
+import re
 import requests
 import uvicorn
 import yaml
@@ -57,18 +58,26 @@ _tcgdex_sets_at: float = 0.0
 
 
 def _load_logo_overrides() -> dict:
-    """Returns {group_name: {logo_url, tcgdex_set_id}}. Old flat format upgraded."""
+    """Returns {"groups": {group_name: {logo_url, tcgdex_set_id}},
+                "virtual_sets": {id: {display_name, logo_url}}}."""
+    empty: dict = {"groups": {}, "virtual_sets": {}}
     try:
         if os.path.exists(LOGO_OVERRIDES_FILE):
             with open(LOGO_OVERRIDES_FILE) as f:
                 raw = yaml.safe_load(f) or {}
-            out = {}
-            for k, v in raw.items():
-                out[k] = v if isinstance(v, dict) else {"logo_url": v, "tcgdex_set_id": None}
-            return out
+
+            def _up(v):
+                return v if isinstance(v, dict) else {"logo_url": v, "tcgdex_set_id": None}
+
+            if "groups" in raw or "virtual_sets" in raw:
+                return {
+                    "groups": {k: _up(v) for k, v in (raw.get("groups") or {}).items()},
+                    "virtual_sets": raw.get("virtual_sets") or {},
+                }
+            return {"groups": {k: _up(v) for k, v in raw.items()}, "virtual_sets": {}}
     except Exception as e:
         print(f"[logo] load overrides failed: {e}")
-    return {}
+    return empty
 
 
 def _save_logo_overrides(overrides: dict) -> None:
@@ -249,9 +258,10 @@ LOGO_DIALOG = """
  </div>
 </div>
 <script>
-let _lgName=null,_lgSets=null,_lgFiltered=[];
+let _lgName=null,_lgSets=null,_lgFiltered=[],_lgVirtual=[];
 function lgOpen(name,hasOverride){
   _lgName=name;
+  _lgVirtual=typeof _vsData!=='undefined'?_vsData:[];
   document.getElementById('lgname').textContent=name;
   document.getElementById('lgq').value='';
   document.getElementById('lgdlg').style.display='flex';
@@ -268,13 +278,29 @@ function lgFilter(){
   if(!_lgSets)return;
   const q=document.getElementById('lgq').value.toLowerCase();
   _lgFiltered=q?_lgSets.filter(s=>s.name.toLowerCase().includes(q)||s.id.includes(q)):_lgSets.slice();
-  document.getElementById('lgsets').innerHTML=_lgFiltered.map((s,i)=>
+  const vsFiltered=q?_lgVirtual.filter(v=>v.display_name.toLowerCase().includes(q)||v.id.includes(q)):_lgVirtual.slice();
+  let html='';
+  if(vsFiltered.length){
+    html+='<div style="grid-column:1/-1;font-size:11px;color:#6c63ff;font-weight:600;margin-top:4px">CUSTOM GROUPS</div>';
+    html+=vsFiltered.map((v,i)=>
+      '<div class="cand" onclick="lgPickVirtual('+i+')" style="display:flex;align-items:center;gap:8px;border:1px solid #6c63ff44">'+
+      (v.logo_url?'<img src="'+v.logo_url+'.png" loading="lazy" style="width:52px;height:30px;object-fit:contain;background:#fff;border-radius:3px;flex-shrink:0">'
+                 :'<div style="width:52px;height:30px;background:#6c63ff22;border-radius:3px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:18px">📦</div>')+
+      '<div><b>'+v.display_name+'</b><br><span class="dim">custom:'+v.id+'</span></div></div>'
+    ).join('');
+    html+='<div style="grid-column:1/-1;font-size:11px;color:#7878a8;font-weight:600;margin-top:8px">TCGDEX SETS</div>';
+  }
+  html+=_lgFiltered.map((s,i)=>
     '<div class="cand" onclick="lgPickIdx('+i+')" style="display:flex;align-items:center;gap:8px">'+
     '<img src="'+s.logo+'.png" loading="lazy" style="width:52px;height:30px;object-fit:contain;background:#fff;border-radius:3px;flex-shrink:0">'+
     '<div><b>'+s.name+'</b><br><span class="dim">'+s.id+'</span></div></div>'
-  ).join('')||'<span class="dim">nothing found</span>';
+  ).join('');
+  document.getElementById('lgsets').innerHTML=html||'<span class="dim">nothing found</span>';
+  _lgVirtualFiltered=vsFiltered;
 }
+let _lgVirtualFiltered=[];
 function lgPickIdx(i){const s=_lgFiltered[i];lgSave(s.logo,s.id)}
+function lgPickVirtual(i){const v=_lgVirtualFiltered[i];lgSave(v.logo_url||null,'custom:'+v.id)}
 function lgSave(logoUrl,setId){
   fetch('/api/logo_override',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({group_name:_lgName,logo_url:logoUrl||null,tcgdex_set_id:setId||null})})
@@ -776,7 +802,9 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
     pending = count_pending(db)
     db.close()
 
-    overrides = _load_logo_overrides()
+    data = _load_logo_overrides()
+    group_overrides = data["groups"]
+    virtual_sets = data["virtual_sets"]
 
     rows_data = []
     for row in sets:
@@ -784,8 +812,8 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
         abbr = row.get("abbreviation") or "—"
         pub = row.get("published_on") or ""
         db_logo = row.get("tcgdex_logo_url")
-        db_set_id = row.get("tcgdex_set_id")  # None on old DB without this column
-        entry = overrides.get(name)  # {logo_url, tcgdex_set_id} or None
+        db_set_id = row.get("tcgdex_set_id")
+        entry = group_overrides.get(name)
         override_logo = entry.get("logo_url") if entry else None
         override_set_id = entry.get("tcgdex_set_id") if entry else None
         effective_logo = override_logo or db_logo
@@ -806,7 +834,8 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
 
     total = len(sets)
     n_auto = sum(1 for r in rows_data if r[5] == "auto")
-    n_override = len(overrides)
+    n_override = len(group_overrides)
+    n_virtual = len(virtual_sets)
     n_unmatched = sum(1 for r in rows_data if r[3] is None)
 
     def flink(s, label):
@@ -839,13 +868,47 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
             f'</tr>'
         )
 
+    # virtual sets panel rows
+    vs_rows = "".join(
+        f'<tr><td><b>{html.escape(v.get("display_name", vid))}</b></td>'
+        f'<td><span class="dim">custom:{html.escape(vid)}</span></td>'
+        f'<td>{sum(1 for r in rows_data if r[4] == "custom:"+vid)} groups assigned</td>'
+        f'<td><button class="ghost" style="font-size:11px;padding:3px 8px" '
+        f'onclick="vsDelete({html.escape(json.dumps(vid))})">Delete</button></td></tr>'
+        for vid, v in virtual_sets.items()
+    )
+    vs_panel = f"""
+<details open style="margin-bottom:12px">
+  <summary style="cursor:pointer;font-weight:600;color:#6c63ff;margin-bottom:8px">
+    Custom groups ({n_virtual}) <span class="dim" style="font-size:11px;font-weight:400">
+    — virtual sets not in TCGDex or TCGCSV</span>
+  </summary>
+  <table style="margin-bottom:8px">
+    <tr><th>display name</th><th>id</th><th>coverage</th><th></th></tr>
+    {vs_rows or '<tr><td colspan="4" class="dim">none yet</td></tr>'}
+  </table>
+  <form onsubmit="vsCreate(event)" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+    <input name="display_name" placeholder="Display name (e.g. McDonald's)" size="28" required>
+    <input name="id" placeholder="ID slug (e.g. mcdonalds)" size="18" required>
+    <button type="submit">+ Create</button>
+  </form>
+</details>"""
+
+    # pass virtual sets to the JS picker as a JSON array
+    vs_json = html.escape(json.dumps([
+        {"id": vid, "display_name": v.get("display_name", vid), "logo_url": v.get("logo_url")}
+        for vid, v in virtual_sets.items()
+    ]))
+
     body = f"""<div style='padding:12px 16px'>
 <p style="display:flex;gap:20px;flex-wrap:wrap">
-  <span><b>{total}</b> <span class="dim">sets total</span></span>
+  <span><b>{total}</b> <span class="dim">TCGCSV groups</span></span>
   <span class="ok"><b>{n_auto}</b> auto-matched</span>
   <span style="color:#6c63ff"><b>{n_override}</b> override{'s' if n_override != 1 else ''}</span>
+  <span style="color:#6c63ff"><b>{n_virtual}</b> custom group{'s' if n_virtual != 1 else ''}</span>
   <span class="bad"><b>{n_unmatched}</b> unmatched</span>
 </p>
+{vs_panel}
 <p style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
   {flink('unmatched', f'Unmatched ({n_unmatched})')}
   {flink('matched', 'Matched')}
@@ -859,13 +922,28 @@ def logo_matcher_page(show: str = "unmatched", q: str = ""):
     <button class="ghost" style="font-size:11px">Download YAML</button></a>
 </p>
 <p class="dim" style="font-size:12px">
-  Assignments are saved to <code>logo_overrides.yaml</code> in the collector directory
-  and applied automatically on the next pipeline run.
+  Assignments saved to <code>logo_overrides.yaml</code>, applied on next pipeline run.
 </p>
 <table>
   <tr><th></th><th>set</th><th>status</th><th></th></tr>
-  {''.join(items) or '<tr><td colspan="4" class="dim">nothing here</td></tr>'}
+  {''.join(items) if items else '<tr><td colspan="4" class="dim">nothing here</td></tr>'}
 </table>
+<script>
+const _vsData={vs_json};
+function vsCreate(e){{
+  e.preventDefault();
+  const f=e.target;
+  fetch('/api/virtual_set',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{action:'create',display_name:f.display_name.value,id:f.id.value}})}})
+  .then(r=>r.json()).then(j=>{{if(j.ok)location.reload();else alert(j.error)}});
+}}
+function vsDelete(id){{
+  if(!confirm('Delete custom group "'+id+'"? Groups assigned to it will be unassigned.'))return;
+  fetch('/api/virtual_set',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{action:'delete',id:id}})}})
+  .then(r=>r.json()).then(j=>{{if(j.ok)location.reload();else alert(j.error)}});
+}}
+</script>
 </div>"""
 
     return page("/logo-matcher", body + LOGO_DIALOG, pending)
@@ -885,12 +963,37 @@ async def api_logo_override(request: Request):
     tcgdex_set_id = body.get("tcgdex_set_id") or None
     if not group_name:
         return JSONResponse({"ok": False, "error": "group_name required"})
-    overrides = _load_logo_overrides()
+    data = _load_logo_overrides()
     if logo_url or tcgdex_set_id:
-        overrides[group_name] = {"logo_url": logo_url, "tcgdex_set_id": tcgdex_set_id}
+        data["groups"][group_name] = {"logo_url": logo_url, "tcgdex_set_id": tcgdex_set_id}
     else:
-        overrides.pop(group_name, None)
-    _save_logo_overrides(overrides)
+        data["groups"].pop(group_name, None)
+    _save_logo_overrides(data)
+    return {"ok": True}
+
+
+@app.post("/api/virtual_set")
+async def api_virtual_set(request: Request):
+    body = await request.json()
+    action = body.get("action")
+    data = _load_logo_overrides()
+    if action == "create":
+        vs_id = re.sub(r"[^a-z0-9_]", "_", (body.get("id") or "").strip().lower())
+        display_name = (body.get("display_name") or "").strip()
+        logo_url = body.get("logo_url") or None
+        if not vs_id or not display_name:
+            return JSONResponse({"ok": False, "error": "id and display_name required"})
+        data["virtual_sets"][vs_id] = {"display_name": display_name, "logo_url": logo_url}
+    elif action == "delete":
+        vs_id = (body.get("id") or "").strip()
+        data["virtual_sets"].pop(vs_id, None)
+        full_id = f"custom:{vs_id}"
+        for g in data["groups"].values():
+            if g.get("tcgdex_set_id") == full_id:
+                g["tcgdex_set_id"] = None
+    else:
+        return JSONResponse({"ok": False, "error": "unknown action"})
+    _save_logo_overrides(data)
     return {"ok": True}
 
 

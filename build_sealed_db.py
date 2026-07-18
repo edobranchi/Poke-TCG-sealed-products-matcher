@@ -109,6 +109,11 @@ CREATE TABLE sealed_sets (
   tcgdex_logo_url   TEXT,
   tcgdex_set_id     TEXT
 );
+CREATE TABLE virtual_sets (
+  id           TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  logo_url     TEXT
+);
 CREATE TABLE sealed_products (
   product_id    INTEGER PRIMARY KEY,
   group_id      INTEGER NOT NULL,
@@ -359,27 +364,32 @@ _BASE_SET_SUFFIX = re.compile(r"\s+base set$", re.IGNORECASE)
 
 
 def load_logo_overrides():
-    """Load manual logo assignments from logo_overrides.yaml (if present).
+    """Load manual assignments from logo_overrides.yaml.
 
-    Returns {group_name: {logo_url: str, tcgdex_set_id: str}}.
-    Old flat format ({group_name: logo_url_str}) is tolerated and upgraded.
+    Returns {"groups": {group_name: {logo_url, tcgdex_set_id}},
+             "virtual_sets": {id: {display_name, logo_url}}}.
+    Old flat and semi-flat formats are upgraded transparently.
     """
+    empty = {"groups": {}, "virtual_sets": {}}
     if not os.path.exists(LOGO_OVERRIDES_FILE):
-        return {}
+        return empty
     try:
         with open(LOGO_OVERRIDES_FILE) as f:
             raw = yaml.safe_load(f) or {}
-        # Upgrade old flat format: {name: url_str} → {name: {logo_url, tcgdex_set_id}}
-        out = {}
-        for k, v in raw.items():
-            if isinstance(v, str):
-                out[k] = {"logo_url": v, "tcgdex_set_id": None}
-            else:
-                out[k] = v
-        return out
+
+        def _upgrade_group(v):
+            return v if isinstance(v, dict) else {"logo_url": v, "tcgdex_set_id": None}
+
+        if "groups" in raw or "virtual_sets" in raw:
+            return {
+                "groups": {k: _upgrade_group(v) for k, v in (raw.get("groups") or {}).items()},
+                "virtual_sets": raw.get("virtual_sets") or {},
+            }
+        # Old flat format: entire file was {group_name: url_or_dict}
+        return {"groups": {k: _upgrade_group(v) for k, v in raw.items()}, "virtual_sets": {}}
     except Exception as e:
         log.warning("logo_overrides load failed: %s", e)
-        return {}
+        return empty
 
 
 def _find_logo(name, logo_map, logo_overrides=None):
@@ -529,6 +539,10 @@ def build_output(state_db, out_dir, today, sets, products, tp_prices,
     out.executemany(
         "INSERT INTO sealed_sets VALUES (:group_id,:name,:abbreviation,:published_on,:tcgdex_logo_url,:tcgdex_set_id)",
         sets)
+    for vs_id, vs in virtual_sets.items():
+        full_id = vs_id if vs_id.startswith("custom:") else f"custom:{vs_id}"
+        out.execute("INSERT OR REPLACE INTO virtual_sets VALUES (?,?,?)",
+                    (full_id, vs.get("display_name", vs_id), vs.get("logo_url")))
 
     priced_count = 0
     for product in products:
@@ -687,9 +701,13 @@ def run(out_dir="out", state_path="collector_state.db", limit_groups=None,
 
         stage = "tcgdex_logos"
         logo_map = fetch_tcgdex_logo_map(session)
-        logo_overrides = load_logo_overrides()
+        overrides_data = load_logo_overrides()
+        logo_overrides = overrides_data["groups"]
+        virtual_sets = overrides_data["virtual_sets"]
         if logo_overrides:
-            log.info("logo_overrides: %d manual assignment(s)", len(logo_overrides))
+            log.info("logo_overrides: %d group assignment(s)", len(logo_overrides))
+        if virtual_sets:
+            log.info("virtual_sets: %d custom grouping(s)", len(virtual_sets))
 
         stage = "tcgcsv"
         sets, products, tp_prices, dropped, unpriced = fetch_tcgplayer(session, limit_groups)
